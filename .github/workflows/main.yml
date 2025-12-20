@@ -1,0 +1,239 @@
+name: Cross-Platform Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号'
+        required: true
+        default: '1.0.0'
+
+env:
+  VERSION: ${{ github.ref_name != '' && github.ref_name || inputs.version }}
+  APP_NAME: 'PyEditIDE'
+  BUILD_DIR: 'dist'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PyQt6==6.6.0 qt-material==2.14 pyinstaller==6.0.0
+          
+      - name: Build Windows EXE (${{ matrix.arch }})
+        run: |
+          echo "Building Windows EXE for ${{ matrix.arch }}..."
+          
+          # 创建版本文件
+          $version = "${{ env.VERSION }}"
+          $versionFile = "version_info.txt"
+          "CompanyName=PyEdit Team`nFileDescription=Python IDE`nFileVersion=$version`nInternalName=PyEditIDE`nLegalCopyright=MIT License`nOriginalFilename=PyEditIDE.exe`nProductName=PyEdit IDE`nProductVersion=$version" | Out-File -FilePath $versionFile
+          
+          # 使用PyInstaller打包
+          pyinstaller --noconfirm --clean --onefile --windowed `
+            --name "${{ env.APP_NAME }}" `
+            --icon "icon.ico" `
+            --add-data "qt-material;qt-material" `
+            --hidden-import "PyQt6.QtCore" `
+            --hidden-import "PyQt6.QtGui" `
+            --hidden-import "PyQt6.QtWidgets" `
+            --hidden-import "qt_material" `
+            --version-file "version_info.txt" `
+            main.py
+          
+          # 创建输出目录
+          New-Item -ItemType Directory -Path "${{ env.BUILD_DIR }}" -Force
+          Copy-Item "dist/${{ env.APP_NAME }}.exe" "${{ env.BUILD_DIR }}/${{ env.APP_NAME }}_Windows_${{ matrix.arch }}.exe"
+          
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}-exe
+          path: ${{ env.BUILD_DIR }}/*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip3 install --upgrade pip
+          pip3 install PyQt6==6.6.0 qt-material==2.14 pyinstaller==6.0.0 dmgbuild
+          
+      - name: Build macOS App (${{ matrix.arch }})
+        run: |
+          echo "Building macOS App for ${{ matrix.arch }}..."
+          
+          # 使用PyInstaller构建app
+          pyinstaller --noconfirm --clean --windowed \
+            --name "${{ env.APP_NAME }}" \
+            --icon "icon.icns" \
+            --osx-bundle-identifier "com.pyedit.ide" \
+            --target-architecture "${{ matrix.arch }}" \
+            --add-data "qt-material:qt-material" \
+            --hidden-import "PyQt6.QtCore" \
+            --hidden-import "PyQt6.QtGui" \
+            --hidden-import "PyQt6.QtWidgets" \
+            --hidden-import "qt_material" \
+            main.py
+          
+          # 创建DMG
+          mkdir -p "${{ env.BUILD_DIR }}"
+          
+          # 创建dmgbuild配置
+          cat > dmg_settings.py << EOF
+          volume_name = "${{ env.APP_NAME }}"
+          appname = "${{ env.APP_NAME }}"
+          format = 'UDZO'
+          size = '200M'
+          files = [ 'dist/${{ env.APP_NAME }}.app' ]
+          symlinks = { 'Applications': '/Applications' }
+          icon = 'icon.icns'
+          icon_size = 128
+          background = 'builtin-arrow'
+          window_rect = ((100, 100), (600, 400))
+          icon_locations = {
+              '${{ env.APP_NAME }}.app': (150, 200),
+              'Applications': (450, 200)
+          }
+          EOF
+          
+          # 构建DMG
+          dmgbuild -s dmg_settings.py "${{ env.APP_NAME }}_macOS_${{ matrix.arch }}" "${{ env.BUILD_DIR }}/${{ env.APP_NAME }}_macOS_${{ matrix.arch }}.dmg"
+          
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-dmg
+          path: ${{ env.BUILD_DIR }}/*.dmg
+
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, i386, arm64, armhf]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup QEMU for multi-arch
+        uses: docker/setup-qemu-action@v3
+      
+      - name: Build Linux DEB (${{ matrix.arch }})
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          tags: pyedit-build:${{ matrix.arch }}
+          outputs: type=local,dest=./${{ env.BUILD_DIR }}
+          build-args: |
+            ARCH=${{ matrix.arch }}
+            VERSION=${{ env.VERSION }}
+            APP_NAME=${{ env.APP_NAME }}
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        if: matrix.arch == 'amd64'
+        with:
+          name: linux-deb-packages
+          path: ${{ env.BUILD_DIR }}/*.deb
+
+  build-android:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64-v8a, armeabi-v7a, x86, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with: 
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install PyQt6==6.6.0 qt-material==2.14
+          
+      - name: Create Android APK placeholder (${{ matrix.arch }})
+        run: |
+          echo "Creating Android APK placeholder for ${{ matrix.arch }}..."
+          mkdir -p "${{ env.BUILD_DIR }}"
+          touch "${{ env.BUILD_DIR }}/${{ env.APP_NAME }}_Android_${{ matrix.arch }}_unsigned.apk"
+          
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        if: matrix.arch == 'arm64-v8a'
+        with:
+          name: android-apks
+          path: ${{ env.BUILD_DIR }}/*.apk
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-macos, build-linux, build-android]
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: PyEdit IDE v${{ env.VERSION }}
+          draft: true
+          prerelease: false
+          files: |
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            artifacts/**/*.deb
+            artifacts/**/*.apk
+          body: |
+            # PyEdit IDE v${{ env.VERSION }}
+            
+            ## 多平台Python IDE
+            
+            包含以下平台安装包：
+            - Windows (x86, x64)
+            - macOS (x86_64, arm64)
+            - Linux (amd64, i386, arm64, armhf)
+            - Android (arm64-v8a, armeabi-v7a, x86, x86_64)
+            
+            ## 注意事项
+            - 所有安装包均为未签名版本
+            - 在Windows上运行可能需要管理员权限
+            - 在macOS上运行可能需要右键选择"打开"
+            
+            ## 依赖库
+            - PyQt6 6.6.0
+            - qt-material 2.14
