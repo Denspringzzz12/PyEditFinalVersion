@@ -1,0 +1,4 @@
+PyQt6==6.6.0
+qt-material==2.14
+pyinstaller==6.0.0
+setuptools==68.2.2
